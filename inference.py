@@ -16,22 +16,32 @@
 # COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
+import os
 import torch
+from unittest.mock import patch
 from transformers import AutoModelForCausalLM
+from transformers.dynamic_module_utils import get_imports
 
 from janus.models import MultiModalityCausalLM, VLChatProcessor
 from janus.utils.io import load_pil_images
 
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+
+
 # specify the path to the model
 model_path = "deepseek-ai/Janus-1.3B"
+
+
+# with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
 vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
 tokenizer = vl_chat_processor.tokenizer
 
 vl_gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
-    model_path, trust_remote_code=True
+    model_path, 
+    trust_remote_code=True,
+    device_map='auto' if torch.cuda.is_available() else None,
 )
-vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
+vl_gpt = vl_gpt.to(torch.bfloat16).to(device).eval()
 
 conversation = [
     {
@@ -61,7 +71,7 @@ outputs = vl_gpt.language_model.generate(
     max_new_tokens=512,
     do_sample=False,
     use_cache=True,
-)
+).to(device)
 
 answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
 print(f"{prepare_inputs['sft_format'][0]}", answer)

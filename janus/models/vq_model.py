@@ -415,6 +415,7 @@ class Upsample(nn.Module):
             )
 
     def forward(self, x):
+        
         if x.dtype != torch.float32:
             x = F.interpolate(x.to(torch.float), scale_factor=2.0, mode="nearest").to(
                 torch.bfloat16

@@ -25,15 +25,41 @@ import numpy as np
 import os
 import PIL.Image
 
+from transformers import AutoConfig
+
+from transformers.utils.import_utils import is_flash_attn_2_available
+print("flash_attn2:", is_flash_attn_2_available())
+import os
+print(os.getenv("USE_FLASH_ATTENTION_2"))  # Should print "0"
+print(os.getenv("FLASH_ATTENTION_2_DISABLED"))  # Should print "1"
+print(torch.backends.mps.is_available())  # Should print True
+print(torch.backends.mps.is_built())  # Should print True
+
+
+
+
+
+
 # specify the path to the model
 model_path = "deepseek-ai/Janus-1.3B"
-vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
+config = AutoConfig.from_pretrained(model_path)
+config.use_flash_attention_2 = False
+config._attn_implementation = "eager"
+
+print(config.use_flash_attention_2)
+
+
+
+vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path, config=config)
 tokenizer = vl_chat_processor.tokenizer
 
 vl_gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
-    model_path, trust_remote_code=True
+    model_path, trust_remote_code=True, config=config
 )
-vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
+
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+vl_gpt = vl_gpt.to(torch.bfloat16).to(device).eval()
+
 
 conversation = [
     {
@@ -66,7 +92,7 @@ def generate(
     input_ids = vl_chat_processor.tokenizer.encode(prompt)
     input_ids = torch.LongTensor(input_ids)
 
-    tokens = torch.zeros((parallel_size*2, len(input_ids)), dtype=torch.int).cuda()
+    tokens = torch.zeros((parallel_size*2, len(input_ids)), dtype=torch.int).to(device)
     for i in range(parallel_size*2):
         tokens[i, :] = input_ids
         if i % 2 != 0:
@@ -74,7 +100,7 @@ def generate(
 
     inputs_embeds = mmgpt.language_model.get_input_embeddings()(tokens)
 
-    generated_tokens = torch.zeros((parallel_size, image_token_num_per_image), dtype=torch.int).cuda()
+    generated_tokens = torch.zeros((parallel_size, image_token_num_per_image), dtype=torch.int).to(device)
 
     for i in range(image_token_num_per_image):
         outputs = mmgpt.language_model.model(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=outputs.past_key_values if i != 0 else None)
@@ -113,4 +139,5 @@ generate(
     vl_gpt,
     vl_chat_processor,
     prompt,
+    parallel_size=1,
 )
