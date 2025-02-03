@@ -39,7 +39,7 @@ def generate_gradcam(attributions, image):
     cam = F.relu(cam)
     cam -= cam.min()
     cam /= cam.max()
-    cam = cam.squeeze().numpy()
+    cam = cam.squeeze().cpu().numpy()
 
     # Resize to match image size
     width, height = image.size  # Get image size from PIL Image
