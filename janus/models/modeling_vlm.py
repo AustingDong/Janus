@@ -263,6 +263,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         return self.gen_aligner(self.gen_embed(image_ids))
 
 
+
 AutoConfig.register("vision", VisionConfig)
 AutoConfig.register("aligner", AlignerConfig)
 AutoConfig.register("gen_vision", GenVisionConfig)

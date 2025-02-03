@@ -3,7 +3,10 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from janus.models import MultiModalityCausalLM, VLChatProcessor
 from janus.utils.io import load_pil_images
+from demo.cam import generate_gradcam
+from captum.attr import LayerGradCam
 from PIL import Image
+from einops import rearrange
 
 import numpy as np
 import os
@@ -20,28 +23,40 @@ language_config._attn_implementation = 'eager'
 vl_gpt = AutoModelForCausalLM.from_pretrained(model_path,
                                              language_config=language_config,
                                              trust_remote_code=True)
+
+dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float16
+# dtype = torch.bfloat32 if torch.cuda.is_available() else torch.float32
+
 if torch.cuda.is_available():
-    vl_gpt = vl_gpt.to(torch.bfloat16).cuda()
+    vl_gpt = vl_gpt.to(dtype).cuda()
 else:
     # vl_gpt = vl_gpt.to(torch.float16)
-    vl_gpt = vl_gpt.to(torch.float16)
+    vl_gpt = vl_gpt.to(dtype)
 
 vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
 tokenizer = vl_chat_processor.tokenizer
 cuda_device = 'cuda' if torch.cuda.is_available() else 'mps'
 
-@torch.inference_mode()
+# @torch.inference_mode() # cancel inference, for gradcam
 # @spaces.GPU(duration=120) 
 # Multimodal Understanding function
 def multimodal_understanding(image, question, seed, top_p, temperature):
     # Clear CUDA cache before generating
     torch.cuda.empty_cache()
+
+
+    for param in vl_gpt.parameters():
+        param.requires_grad = True
     
     # set seed
     torch.manual_seed(seed)
     np.random.seed(seed)
     torch.cuda.manual_seed(seed)
     
+
+    # Get the last transformer block of the Vision Transformer (ViT)
+
+
     conversation = [
         {
             "role": "<|User|>",
@@ -54,11 +69,16 @@ def multimodal_understanding(image, question, seed, top_p, temperature):
     pil_images = [Image.fromarray(image)]
     prepare_inputs = vl_chat_processor(
         conversations=conversation, images=pil_images, force_batchify=True
-    ).to(cuda_device, dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float16)
+    ).to(cuda_device, dtype=dtype)
     
+
+
     
     inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
+
+    # print("prepared inputs", prepare_inputs)
     
+
     outputs = vl_gpt.language_model.generate(
         inputs_embeds=inputs_embeds,
         attention_mask=prepare_inputs.attention_mask,
@@ -71,9 +91,64 @@ def multimodal_understanding(image, question, seed, top_p, temperature):
         temperature=temperature,
         top_p=top_p,
     )
+
+
     
     answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
-    return answer
+
+    # for name, param in vl_gpt.vision_model.named_parameters():
+    #     if param.grad is not None:
+    #         print(f"{name} has gradients: {param.grad.norm().item()}")
+    #     else:
+    #         print(f"{name} has NO gradients!")
+
+
+
+    print("generating guided gradcam...")
+
+    import torch.nn as nn
+
+    class ViTForGradCAM(nn.Module):
+        def __init__(self, vision_model):
+            super().__init__()
+            self.vision_model = vision_model
+
+        def forward(self, images):
+            # Get the output from your ViT model.
+            # Suppose the output shape is [batch, T2, D]
+            outputs = self.vision_model(images)
+            
+            # Select the [CLS] token (assuming it's at index 0)
+            cls_token = outputs[:, 0, :]  # shape: [batch, D]
+            
+            # Now, reduce the vector to a scalar.
+            # Option 1: Simply take one element, e.g. the first element:
+            scalar_output = cls_token[:, 0]  # shape: [batch]
+            
+            # Option 2: Or aggregate, for example using a linear layer or a pooling operation:
+            # scalar_output = cls_token.mean(dim=1)  # shape: [batch]
+            
+            return scalar_output
+
+    # Wrap your vision model
+    vit_scalar_model = ViTForGradCAM(vl_gpt.vision_model)
+    target_layer = vit_scalar_model.vision_model.vision_tower.blocks[-1].norm1
+
+    bs, n = prepare_inputs.pixel_values.shape[0:2]
+    images = rearrange(prepare_inputs.pixel_values, "b n c h w -> (b n) c h w")
+    # [b x n, T2, D]
+    images_embeds = vit_scalar_model(images)
+
+    guided_gc = LayerGradCam(vit_scalar_model, layer=target_layer)
+    print("generating attribute...")
+    attribution = guided_gc.attribute(
+        images,
+        # target=0
+    )
+    print("generating saliency map...")
+    saliency_map = generate_gradcam(attribution, pil_images[0])
+
+    return answer, [saliency_map]
 
 
 def generate(input_ids,
@@ -177,7 +252,10 @@ def generate_image(prompt,
 with gr.Blocks() as demo:
     gr.Markdown(value="# Multimodal Understanding")
     with gr.Row():
-        image_input = gr.Image()
+        with gr.Column():
+            image_input = gr.Image()
+            saliency_map_output = gr.Gallery(label="Saliency Map", columns=1, rows=1, height=300)
+
         with gr.Column():
             question_input = gr.Textbox(label="Question")
             und_seed_input = gr.Number(label="Seed", precision=0, value=42)
@@ -186,6 +264,7 @@ with gr.Blocks() as demo:
         
     understanding_button = gr.Button("Chat")
     understanding_output = gr.Textbox(label="Response")
+
 
     examples_inpainting = gr.Examples(
         label="Multimodal Understanding examples",
@@ -202,6 +281,8 @@ with gr.Blocks() as demo:
         inputs=[question_input, image_input],
     )
     
+
+
         
     gr.Markdown(value="# Text-to-Image Generation")
 
@@ -234,7 +315,7 @@ with gr.Blocks() as demo:
     understanding_button.click(
         multimodal_understanding,
         inputs=[image_input, question_input, und_seed_input, top_p, temperature],
-        outputs=understanding_output
+        outputs=[understanding_output, saliency_map_output]
     )
     
     generation_button.click(
