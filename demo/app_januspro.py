@@ -12,7 +12,7 @@ import numpy as np
 import os
 import time
 # import spaces  # Import spaces for ZeroGPU compatibility
-torch.set_default_device("mps")
+
 
 # Load model and processor
 # model_path = "deepseek-ai/Janus-Pro-7B"
@@ -31,6 +31,7 @@ if torch.cuda.is_available():
     vl_gpt = vl_gpt.to(dtype).cuda()
 else:
     # vl_gpt = vl_gpt.to(torch.float16)
+    torch.set_default_device("mps")
     vl_gpt = vl_gpt.to(dtype)
 
 vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
