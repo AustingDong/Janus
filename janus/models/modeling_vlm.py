@@ -261,6 +261,55 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
     def prepare_gen_img_embeds(self, image_ids: torch.LongTensor):
         return self.gen_aligner(self.gen_embed(image_ids))
+    
+
+    def forward(self,
+        input_tensor,
+        tokenizer,
+        temperature,
+        top_p,
+        **kwargs,
+        ):
+        # input_ids,pixel_values,images_seq_mask,images_emb_mask,attention_mask = input_tensor
+
+        bs, n = input_tensor.pixel_values.shape[0:2]
+        images = rearrange(input_tensor.pixel_values, "b n c h w -> (b n) c h w")
+        images_embeds = self.aligner(self.vision_model(images))  # shape: [batch, T, D]
+        
+        # [b x n, T2, D] -> [b, n x T2, D]
+        images_embeds = rearrange(images_embeds, "(b n) t d -> b (n t) d", b=bs, n=n)
+        # [b, n, T2] -> [b, n x T2]
+        images_emb_mask = rearrange(input_tensor.images_emb_mask, "b n t -> b (n t)")
+
+
+
+        # [b, T, D]
+        input_tensor.input_ids[input_tensor.input_ids < 0] = 0  # ignore the image embeddings
+        # print("input_ids: ", input_ids)
+
+        inputs_embeds = self.language_model.get_input_embeddings()(input_tensor.input_ids)
+        # print("input_embeddings: ", inputs_embeds)
+
+        # replace with the image embeddings
+        inputs_embeds[input_tensor.images_seq_mask] = images_embeds[images_emb_mask]
+
+
+        outputs = self.language_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=input_tensor.attention_mask,
+            pad_token_id=tokenizer.eos_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            max_new_tokens=512,
+            do_sample=False if temperature == 0 else True,
+            use_cache=True,
+            temperature=temperature,
+            top_p=top_p,
+        )
+
+        
+        # return inputs_embeds
+        return outputs
 
 
 

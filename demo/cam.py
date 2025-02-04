@@ -38,6 +38,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 
+
 class GradCAM:
     def __init__(self, model, target_layer):
         """
@@ -67,23 +68,27 @@ class GradCAM:
         for h in self.hook_handles:
             h.remove()
 
-    def __call__(self, input_tensor, target_token_idx=0):
+    def __call__(self, input_tensor, tokenizer, temperature, top_p, target_token_idx=0):
         """
         input_tensor: image tensor of shape (1, C, H, W)
-        target_token_idx: which patch token (0 to 575) to use for computing gradients.
+        target_token_idx: which patch token to use for computing gradients.
                           You can experiment with different indices.
         """
         # Forward pass: model output shape will be (1, 576, 1024)
-        output = self.model(**input_tensor)
+        output_obj = self.model(input_tensor, tokenizer, temperature, top_p)
+        print(output_obj)
+        output = output_obj.logits
         # Select a target scalar value from the token of interest.
         # For example, you can sum the activations for the target token.
         target = output[0, target_token_idx].sum()
         self.model.zero_grad()
         target.backward(retain_graph=True)
+        
+
         # At this point, self.activations and self.gradients are populated.
         # Compute the weights by global average pooling the gradients over channels.
         # Both activations and gradients have shape (1, 576, 1024)
-        weights = self.gradients.sum(dim=-1, keepdim=True)  # shape: (1, 576, 1)
+        weights = self.gradients.mean(dim=-1, keepdim=True)  # shape: (1, 576, 1)
         # Weighted combination: multiply activations by weights and sum over channels.
         cam = (weights * self.activations).sum(dim=-1)  # shape: (1, 576)
         cam = F.relu(cam)
@@ -91,7 +96,7 @@ class GradCAM:
         cam_min = cam.min()
         cam_max = cam.max()
         cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
-        return cam  # shape: (1, 576)
+        return cam, output_obj  # shape: (1, 576)
     
 
 def generate_gradcam(

@@ -3,8 +3,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from janus.models import MultiModalityCausalLM, VLChatProcessor
 from janus.utils.io import load_pil_images
-from demo.cam import generate_gradcam
-from captum.attr import LayerGradCam
+from demo.cam import generate_gradcam, GradCAM
 from PIL import Image
 from einops import rearrange
 
@@ -38,10 +37,12 @@ vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
 tokenizer = vl_chat_processor.tokenizer
 cuda_device = 'cuda' if torch.cuda.is_available() else 'mps'
 
+
+
 # @torch.inference_mode() # cancel inference, for gradcam
 # @spaces.GPU(duration=120) 
 # Multimodal Understanding function
-def multimodal_understanding(image, question, seed, top_p, temperature):
+def multimodal_understanding(image, question, seed, top_p, temperature, target_token_idx):
     # Clear CUDA cache before generating
     torch.cuda.empty_cache()
 
@@ -96,60 +97,76 @@ def multimodal_understanding(image, question, seed, top_p, temperature):
 
     
     answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
-
-    # for name, param in vl_gpt.vision_model.named_parameters():
-    #     if param.grad is not None:
-    #         print(f"{name} has gradients: {param.grad.norm().item()}")
-    #     else:
-    #         print(f"{name} has NO gradients!")
+    print("answer generated")
 
 
+    # class ViTForGradCAM(torch.nn.Module):
+    #     def __init__(self, vision_model, aligner, language_model):
+    #         super().__init__()
+    #         self.vision_model = vision_model
+    #         self.aligner = aligner
+    #         self.language_model = language_model
 
-    print("generating guided gradcam...")
-
-    import torch.nn as nn
-
-    class ViTForGradCAM(nn.Module):
-        def __init__(self, vision_model):
-            super().__init__()
-            self.vision_model = vision_model
-
-        def forward(self, images):
-            # Get the output from your ViT model.
-            # Suppose the output shape is [batch, T2, D]
-            outputs = self.vision_model(images)
+    #     def forward(self,
+    #         input_ids: torch.LongTensor,
+    #         pixel_values: torch.FloatTensor,
+    #         images_seq_mask: torch.LongTensor,
+    #         images_emb_mask: torch.LongTensor,
+    #         **kwargs,
+    #         ):
+    #         bs, n = pixel_values.shape[0:2]
+    #         images = rearrange(pixel_values, "b n c h w -> (b n) c h w")
+    #         images_embeds = self.aligner(self.vision_model(images))  # shape: [batch, T, D]
             
-            # Select the [CLS] token (assuming it's at index 0)
-            cls_token = outputs[:, 0, :]  # shape: [batch, D]
+    #         # [b x n, T2, D] -> [b, n x T2, D]
+    #         images_embeds = rearrange(images_embeds, "(b n) t d -> b (n t) d", b=bs, n=n)
+    #         # [b, n, T2] -> [b, n x T2]
+    #         images_emb_mask = rearrange(images_emb_mask, "b n t -> b (n t)")
+
+
+
+    #         # [b, T, D]
+    #         input_ids[input_ids < 0] = 0  # ignore the image embeddings
+    #         # print("input_ids: ", input_ids)
+
+    #         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+    #         # print("input_embeddings: ", inputs_embeds)
+
+    #         # replace with the image embeddings
+    #         inputs_embeds[images_seq_mask] = images_embeds[images_emb_mask]
+
+
+    #         outputs = vl_gpt.language_model(
+    #             inputs_embeds=inputs_embeds,
+    #             attention_mask=prepare_inputs.attention_mask,
+    #             pad_token_id=tokenizer.eos_token_id,
+    #             bos_token_id=tokenizer.bos_token_id,
+    #             eos_token_id=tokenizer.eos_token_id,
+    #             max_new_tokens=512,
+    #             do_sample=False if temperature == 0 else True,
+    #             use_cache=True,
+    #             temperature=temperature,
+    #             top_p=top_p,
+    #         )
+
             
-            # Now, reduce the vector to a scalar.
-            # Option 1: Simply take one element, e.g. the first element:
-            scalar_output = cls_token[:, 0]  # shape: [batch]
-            
-            # Option 2: Or aggregate, for example using a linear layer or a pooling operation:
-            # scalar_output = cls_token.mean(dim=1)  # shape: [batch]
-            
-            return scalar_output
+    #         # return inputs_embeds
+    #         return outputs
 
-    # Wrap your vision model
-    vit_scalar_model = ViTForGradCAM(vl_gpt.vision_model)
-    target_layer = vit_scalar_model.vision_model.vision_tower.blocks[-1].norm1
 
-    bs, n = prepare_inputs.pixel_values.shape[0:2]
-    images = rearrange(prepare_inputs.pixel_values, "b n c h w -> (b n) c h w")
-    # [b x n, T2, D]
-    images_embeds = vit_scalar_model(images)
+    target_layer = vl_gpt.vision_model.vision_tower.norm
 
-    guided_gc = LayerGradCam(vit_scalar_model, layer=target_layer)
-    print("generating attribute...")
-    attribution = guided_gc.attribute(
-        images,
-        # target=0
-    )
-    print("generating saliency map...")
-    saliency_map = generate_gradcam(attribution, pil_images[0])
+    gradcam = GradCAM(vl_gpt, target_layer)
+    cam_tensor, output = gradcam(prepare_inputs, tokenizer, temperature, top_p, target_token_idx)
+    cam_grid = cam_tensor.reshape(24, 24)
+    cam = generate_gradcam(cam_grid, image)
 
-    return answer, [saliency_map]
+    output_arr = output.logits.detach().to(float).to("cpu").numpy()
+    predicted_ids = np.argmax(output_arr, axis=-1) # [1, num_tokens]
+    predicted_ids = predicted_ids.squeeze(0) # [num_tokens]
+    target_token_decoded = tokenizer.decode(predicted_ids[target_token_idx].tolist())
+
+    return answer, [cam], target_token_decoded
 
 
 def generate(input_ids,
@@ -262,9 +279,11 @@ with gr.Blocks() as demo:
             und_seed_input = gr.Number(label="Seed", precision=0, value=42)
             top_p = gr.Slider(minimum=0, maximum=1, value=0.95, step=0.05, label="top_p")
             temperature = gr.Slider(minimum=0, maximum=1, value=0.1, step=0.05, label="temperature")
+            target_token_idx = gr.Number(label="target_token_idx", precision=0, value=300)
         
     understanding_button = gr.Button("Chat")
     understanding_output = gr.Textbox(label="Response")
+    understanding_target_token_decoded_output = gr.Textbox(label="Target Token Decoded")
 
 
     examples_inpainting = gr.Examples(
@@ -315,8 +334,8 @@ with gr.Blocks() as demo:
     
     understanding_button.click(
         multimodal_understanding,
-        inputs=[image_input, question_input, und_seed_input, top_p, temperature],
-        outputs=[understanding_output, saliency_map_output]
+        inputs=[image_input, question_input, und_seed_input, top_p, temperature, target_token_idx],
+        outputs=[understanding_output, saliency_map_output, understanding_target_token_decoded_output]
     )
     
     generation_button.click(
