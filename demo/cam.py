@@ -100,76 +100,80 @@ class GradCAM:
 
 
 
-# Reduce peak-amplifcation
-class AttentionGuidedCAM:
-    def __init__(self, model, target_layer):
+# import torch
+# import torch.nn.functional as F
+# import numpy as np
+# import cv2
+# import matplotlib.pyplot as plt
+# from transformers import CLIPProcessor, CLIPVisionModel
+
+class ViTGradCAM:
+    def __init__(self, model, target_layers):
         self.model = model
-        self.target_layer = target_layer
-        self.gradients = None
-        self.activations = None
+        self.target_layers = target_layers  # Use ALL layers, not just the last
+        self.gradients = []
+        self.activations = []
         self.hooks = []
         self._register_hooks()
 
     def _register_hooks(self):
-        """ Register hooks to extract activations and gradients. """
-        def forward_hook(module, input, output):
-            self.activations = output
+        """ Registers hooks to extract activations and gradients from ALL attention layers. """
+        for layer in self.target_layers:
+            self.hooks.append(layer.register_forward_hook(self._forward_hook))
+            self.hooks.append(layer.register_backward_hook(self._backward_hook))
 
-        def backward_hook(module, grad_in, grad_out):
-            self.gradients = grad_out[0]
+    def _forward_hook(self, module, input, output):
+        """ Stores attention maps (before softmax) """
+        self.activations.append(output)
 
-        # Register hooks on the target self-attention layer
-        self.hooks.append(self.target_layer.register_forward_hook(forward_hook))
-        self.hooks.append(self.target_layer.register_backward_hook(backward_hook))
+    def _backward_hook(self, module, grad_in, grad_out):
+        """ Stores gradients """
+        self.gradients.append(grad_out[0])
 
     def generate_cam(self, input_tensor, tokenizer, temperature, top_p, class_idx=None):
-        """ Generate Grad-CAM heatmap for the given image. """
+        """ Generates Grad-CAM heatmap for ViT. """
         self.model.zero_grad()
         
         # Forward pass
-        output = self.model(input_tensor, tokenizer, temperature, top_p,)  # Get logits
-        
+        output = self.model(input_tensor, tokenizer, temperature, top_p)
+
         if class_idx is None:
-            class_idx = torch.argmax(output.logits, dim=1).item()  # Choose top class
+            class_idx = torch.argmax(output.logits, dim=1).item()
 
-        # Compute gradients
-        target = output.logits[0, class_idx].sum()
-        # self.model.zero_grad()
-        target.backward(retain_graph=True)
-        # output.logits[:, class_idx].backward(retain_graph=True)
+        # Backpropagate to get gradients
+        output.logits[:, class_idx].backward(retain_graph=True)
 
-        # Aggregate gradients and activations
-        grads = self.gradients.mean(dim=[1, 2])  # Average across spatial dims
-        activations = self.activations  # Self-attention maps
+        # Aggregate activations and gradients from ALL layers
+        cam_sum = None
+        for act, grad in zip(self.activations, self.gradients):
+            # Apply sigmoid normalization (per paper)
+            act = torch.sigmoid(act)
+            
+            # Compute weighted sum
+            cam = torch.einsum("b h n, b h n -> b n", act, grad.mean(dim=[1, 2]))
 
-        # Weighted sum of activations
-        cam = torch.einsum("b h n, b h n -> b n", activations, grads)
+            if cam_sum is None:
+                cam_sum = cam
+            else:
+                cam_sum += cam  # Sum across layers
 
-        # Apply ReLU
-        cam = F.relu(cam)
-        
         # Normalize
-        cam = cam - cam.min()
-        cam = cam / cam.max()
+        cam_sum = F.relu(cam_sum)
+        cam_sum = cam_sum - cam_sum.min()
+        cam_sum = cam_sum / cam_sum.max()
 
-        # Reshape to patch layout (24 × 24 for CLIP)
-        cam = cam.view(24, 24).detach().cpu().numpy()
-        
-        # Upscale to image size
-        cam = cv2.resize(cam, (224, 224))
-        
-        return cam, output
+        # Reshape to 24x24 (since CLIP uses 576 patches)
+        cam_sum = cam_sum.view(24, 24).detach().cpu().numpy()
+
+        # Resize to 224x224
+        cam_sum = cv2.resize(cam_sum, (224, 224))
+
+        return cam_sum
 
     def remove_hooks(self):
-        """ Remove hooks to free memory. """
+        """ Remove hooks after usage. """
         for hook in self.hooks:
             hook.remove()
-
-
-
-
-
-
 
 
 
