@@ -100,60 +100,6 @@ def multimodal_understanding(image, question, seed, top_p, temperature, target_t
     print("answer generated")
 
 
-    # class ViTForGradCAM(torch.nn.Module):
-    #     def __init__(self, vision_model, aligner, language_model):
-    #         super().__init__()
-    #         self.vision_model = vision_model
-    #         self.aligner = aligner
-    #         self.language_model = language_model
-
-    #     def forward(self,
-    #         input_ids: torch.LongTensor,
-    #         pixel_values: torch.FloatTensor,
-    #         images_seq_mask: torch.LongTensor,
-    #         images_emb_mask: torch.LongTensor,
-    #         **kwargs,
-    #         ):
-    #         bs, n = pixel_values.shape[0:2]
-    #         images = rearrange(pixel_values, "b n c h w -> (b n) c h w")
-    #         images_embeds = self.aligner(self.vision_model(images))  # shape: [batch, T, D]
-            
-    #         # [b x n, T2, D] -> [b, n x T2, D]
-    #         images_embeds = rearrange(images_embeds, "(b n) t d -> b (n t) d", b=bs, n=n)
-    #         # [b, n, T2] -> [b, n x T2]
-    #         images_emb_mask = rearrange(images_emb_mask, "b n t -> b (n t)")
-
-
-
-    #         # [b, T, D]
-    #         input_ids[input_ids < 0] = 0  # ignore the image embeddings
-    #         # print("input_ids: ", input_ids)
-
-    #         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-    #         # print("input_embeddings: ", inputs_embeds)
-
-    #         # replace with the image embeddings
-    #         inputs_embeds[images_seq_mask] = images_embeds[images_emb_mask]
-
-
-    #         outputs = vl_gpt.language_model(
-    #             inputs_embeds=inputs_embeds,
-    #             attention_mask=prepare_inputs.attention_mask,
-    #             pad_token_id=tokenizer.eos_token_id,
-    #             bos_token_id=tokenizer.bos_token_id,
-    #             eos_token_id=tokenizer.eos_token_id,
-    #             max_new_tokens=512,
-    #             do_sample=False if temperature == 0 else True,
-    #             use_cache=True,
-    #             temperature=temperature,
-    #             top_p=top_p,
-    #         )
-
-            
-    #         # return inputs_embeds
-    #         return outputs
-
-
     target_layer = vl_gpt.vision_model.vision_tower.norm
 
     gradcam = GradCAM(vl_gpt, target_layer)

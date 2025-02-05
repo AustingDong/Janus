@@ -76,7 +76,7 @@ class GradCAM:
         """
         # Forward pass: model output shape will be (1, 576, 1024)
         output_obj = self.model(input_tensor, tokenizer, temperature, top_p)
-        print(output_obj)
+        # print(output_obj)
         output = output_obj.logits
         # Select a target scalar value from the token of interest.
         # For example, you can sum the activations for the target token.
