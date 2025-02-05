@@ -97,7 +97,84 @@ class GradCAM:
         cam_max = cam.max()
         cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
         return cam, output_obj  # shape: (1, 576)
-    
+
+
+
+# Reduce peak-amplifcation
+class AttentionGuidedCAM:
+    def __init__(self, model, target_layer):
+        """
+        model: your model that outputs patch tokens (e.g., shape (1,576,1024))
+        target_layer: the layer at which to capture activations and gradients
+        """
+        self.model = model
+        self.target_layer = target_layer
+        self.gradients = None
+        self.activations = None
+        self.hook_handles = []
+        self._register_hooks()
+
+    def _register_hooks(self):
+        # Forward hook to capture activations
+        def forward_hook(module, input, output):
+            self.activations = output.detach()
+        # Backward hook to capture gradients
+        def backward_hook(module, grad_input, grad_output):
+            self.gradients = grad_output[0].detach()
+
+        h_forward = self.target_layer.register_forward_hook(forward_hook)
+        h_backward = self.target_layer.register_backward_hook(backward_hook)
+        self.hook_handles.extend([h_forward, h_backward])
+
+    def remove_hooks(self):
+        for h in self.hook_handles:
+            h.remove()
+
+    def __call__(self, input_tensor, tokenizer, temperature, top_p, target_token_idx=0):
+        """
+        input_tensor: image tensor of shape (1, C, H, W)
+        target_token_idx: which patch token to use for computing gradients.
+                          You can experiment with different indices.
+        """
+        # Forward pass: model output shape will be (1, 576, 1024)
+        output_obj = self.model(input_tensor, tokenizer, temperature, top_p)
+        print(output_obj)
+        output = output_obj.logits
+        # Select a target scalar value from the token of interest.
+        # For example, you can sum the activations for the target token.
+        target = output[0, target_token_idx].sum()
+        self.model.zero_grad()
+        target.backward(retain_graph=True)
+        
+
+        # At this point, self.activations and self.gradients are populated.
+        # Compute the weights by global average pooling the gradients over channels.
+        # Both activations and gradients have shape (1, 576, 1024)
+        weights = self.gradients.mean(dim=-1, keepdim=True)  # shape: (1, 576, 1)
+        # Weighted combination: multiply activations by weights and sum over channels.
+        cam = (weights * self.activations).sum(dim=-1)  # shape: (1, 576)
+        cam = F.relu(cam)
+        # Normalize CAM per sample (here, only one sample)
+        cam_min = cam.min()
+        cam_max = cam.max()
+        cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
+        return cam, output_obj  # shape: (1, 576)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def generate_gradcam(
     attributions, 
