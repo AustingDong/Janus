@@ -122,18 +122,21 @@ class AttentionGuidedCAM:
         self.hooks.append(self.target_layer.register_forward_hook(forward_hook))
         self.hooks.append(self.target_layer.register_backward_hook(backward_hook))
 
-    def generate_cam(self, image_tensor, class_idx=None):
+    def generate_cam(self, input_tensor, tokenizer, temperature, top_p, class_idx=None):
         """ Generate Grad-CAM heatmap for the given image. """
         self.model.zero_grad()
         
         # Forward pass
-        output = self.model(image_tensor)  # Get logits
+        output = self.model(input_tensor, tokenizer, temperature, top_p,)  # Get logits
         
         if class_idx is None:
             class_idx = torch.argmax(output.logits, dim=1).item()  # Choose top class
 
         # Compute gradients
-        output.logits[:, class_idx].backward(retain_graph=True)
+        target = output.logits[0, class_idx].sum()
+        # self.model.zero_grad()
+        target.backward(retain_graph=True)
+        # output.logits[:, class_idx].backward(retain_graph=True)
 
         # Aggregate gradients and activations
         grads = self.gradients.mean(dim=[1, 2])  # Average across spatial dims
