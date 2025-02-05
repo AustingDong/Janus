@@ -100,7 +100,7 @@ def multimodal_understanding(image, question, seed, top_p, temperature, target_t
     print("answer generated")
 
 
-    target_layer = vl_gpt.vision_model.vision_tower.norm
+    target_layer = vl_gpt.vision_model.vision_tower.blocks[-1].attn
 
     gradcam = AttentionGuidedCAM(vl_gpt, target_layer)
     cam_tensor, output = gradcam(prepare_inputs, tokenizer, temperature, top_p, target_token_idx)
