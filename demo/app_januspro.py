@@ -3,7 +3,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from janus.models import MultiModalityCausalLM, VLChatProcessor
 from janus.utils.io import load_pil_images
-from demo.cam import generate_gradcam, GradCAM
+from demo.cam import generate_gradcam, GradCAM, AttentionGuidedCAM
 from PIL import Image
 from einops import rearrange
 
@@ -102,7 +102,7 @@ def multimodal_understanding(image, question, seed, top_p, temperature, target_t
 
     target_layer = vl_gpt.vision_model.vision_tower.norm
 
-    gradcam = GradCAM(vl_gpt, target_layer)
+    gradcam = AttentionGuidedCAM(vl_gpt, target_layer)
     cam_tensor, output = gradcam(prepare_inputs, tokenizer, temperature, top_p, target_token_idx)
     cam_grid = cam_tensor.reshape(24, 24)
     cam = generate_gradcam(cam_grid, image)
