@@ -52,6 +52,7 @@ class vision_head(torch.nn.Module):
 
 
 def model_name_to_cls(cls_name):
+    
     if "MlpProjector" in cls_name:
         cls = MlpProjector
 
@@ -255,6 +256,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         # replace with the image embeddings
+        images_embeds = images_embeds[:, 1:, :]
         inputs_embeds[images_seq_mask] = images_embeds[images_emb_mask]
 
         return inputs_embeds
@@ -281,6 +283,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         # [b, n, T2] -> [b, n x T2]
         images_emb_mask = rearrange(input_tensor.images_emb_mask, "b n t -> b (n t)")
 
+        print("image_embeds shape: ", images_embeds.shape)
 
 
         # [b, T, D]
@@ -290,9 +293,13 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         inputs_embeds = self.language_model.get_input_embeddings()(input_tensor.input_ids)
         # print("input_embeddings: ", inputs_embeds)
 
-        # replace with the image embeddings
-        inputs_embeds[input_tensor.images_seq_mask] = images_embeds[images_emb_mask]
+        images_embeds_rest = images_embeds[:, 1:, :]
 
+        # images_embeds_pooled = images_embeds.mean(dim=1)
+
+        # replace with the image embeddings
+        inputs_embeds[input_tensor.images_seq_mask] = images_embeds_rest[images_emb_mask]
+        print("inputs_embeds shape: ", inputs_embeds.shape)
 
         outputs = self.language_model(
             inputs_embeds=inputs_embeds,
@@ -305,11 +312,12 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             use_cache=True,
             temperature=temperature,
             top_p=top_p,
+            output_attentions=True
         )
 
         
-        # return inputs_embeds
-        return outputs
+        return images_embeds, inputs_embeds, outputs
+        # return outputs
 
 
 

@@ -86,6 +86,8 @@ class CLIPVisionTower(nn.Module):
         return vision_tower, forward_kwargs
 
     def feature_select(self, image_forward_outs):
+        print("Select Feature Methodology: ", self.select_feature)
+        
         if isinstance(image_forward_outs, torch.Tensor):
             # the output has been the self.select_layer"s features
             image_features = image_forward_outs

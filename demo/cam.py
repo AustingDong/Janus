@@ -1,4 +1,3 @@
-
 import cv2
 import numpy as np
 import torch
@@ -9,108 +8,9 @@ from scipy.ndimage import filters
 from torch import nn
 
 
-
-# def generate_gradcam(attributions, image):
-#     """Computes Grad-CAM for the last vision layer in SigLIP."""
-#     print("generating gradcam...")
-
-#     print("attributions shape: ", attributions.shape)
-
-#     # Compute Grad-CAM
-#     cam = attributions.sum(dim=0)  # Ensure sum is applied correctly
-#     cam = F.relu(cam)
-#     cam -= cam.min()
-#     cam /= cam.max()
-#     cam = cam.squeeze().to(float).detach().cpu().numpy()
-
-#     # Resize to match image size
-#     width, height = image.size  # Get image size from PIL Image
-#     cam = cv2.resize(cam, (width, height))
-#     heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
-#     overlay = cv2.addWeighted(np.array(image), 0.5, heatmap, 0.5, 0)
-    
-#     return Image.fromarray(overlay)
-
-import cv2
-import numpy as np
-import torch
-import torch.nn.functional as F
-from PIL import Image
-
-
-
-class GradCAM:
-    def __init__(self, model, target_layer):
-        """
-        model: your model that outputs patch tokens (e.g., shape (1,576,1024))
-        target_layer: the layer at which to capture activations and gradients
-        """
+class AttentionGuidedCAM:
+    def __init__(self, model):
         self.model = model
-        self.target_layer = target_layer
-        self.gradients = None
-        self.activations = None
-        self.hook_handles = []
-        self._register_hooks()
-
-    def _register_hooks(self):
-        # Forward hook to capture activations
-        def forward_hook(module, input, output):
-            self.activations = output.detach()
-        # Backward hook to capture gradients
-        def backward_hook(module, grad_input, grad_output):
-            self.gradients = grad_output[0].detach()
-
-        h_forward = self.target_layer.register_forward_hook(forward_hook)
-        h_backward = self.target_layer.register_backward_hook(backward_hook)
-        self.hook_handles.extend([h_forward, h_backward])
-
-    def remove_hooks(self):
-        for h in self.hook_handles:
-            h.remove()
-
-    def __call__(self, input_tensor, tokenizer, temperature, top_p, target_token_idx=0):
-        """
-        input_tensor: image tensor of shape (1, C, H, W)
-        target_token_idx: which patch token to use for computing gradients.
-                          You can experiment with different indices.
-        """
-        # Forward pass: model output shape will be (1, 576, 1024)
-        output_obj = self.model(input_tensor, tokenizer, temperature, top_p)
-        # print(output_obj)
-        output = output_obj.logits
-        # Select a target scalar value from the token of interest.
-        # For example, you can sum the activations for the target token.
-        target = output[0, target_token_idx].sum()
-        self.model.zero_grad()
-        target.backward(retain_graph=True)
-        
-
-        # At this point, self.activations and self.gradients are populated.
-        # Compute the weights by global average pooling the gradients over channels.
-        # Both activations and gradients have shape (1, 576, 1024)
-        weights = self.gradients.mean(dim=-1, keepdim=True)  # shape: (1, 576, 1)
-        # Weighted combination: multiply activations by weights and sum over channels.
-        cam = (weights * self.activations).sum(dim=-1)  # shape: (1, 576)
-        cam = F.relu(cam)
-        # Normalize CAM per sample (here, only one sample)
-        cam_min = cam.min()
-        cam_max = cam.max()
-        cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
-        return cam, output_obj  # shape: (1, 576)
-
-
-
-# import torch
-# import torch.nn.functional as F
-# import numpy as np
-# import cv2
-# import matplotlib.pyplot as plt
-# from transformers import CLIPProcessor, CLIPVisionModel
-
-class ViTGradCAM:
-    def __init__(self, model, target_layers):
-        self.model = model
-        self.target_layers = target_layers  # Use ALL layers, not just the last
         self.gradients = []
         self.activations = []
         self.hooks = []
@@ -130,68 +30,195 @@ class ViTGradCAM:
         """ Stores gradients """
         self.gradients.append(grad_out[0])
 
-    def generate_cam(self, input_tensor, tokenizer, temperature, top_p, class_idx=None):
+    
+    def remove_hooks(self):
+        """ Remove hooks after usage. """
+        for hook in self.hooks:
+            hook.remove()
+    
+    def generate_cam(self, input_tensor, class_idx=None):
+        raise NotImplementedError
+
+
+
+
+class AttentionGuidedCAMClip(AttentionGuidedCAM):
+    def __init__(self, model, target_layers):
+        self.target_layers = target_layers[-1:]
+        super().__init__(model)
+        
+
+    def generate_cam(self, input_tensor, class_idx=None, visual_pooling_method="CLS"):
         """ Generates Grad-CAM heatmap for ViT. """
         self.model.zero_grad()
         
         # Forward pass
-        output = self.model(input_tensor, tokenizer, temperature, top_p)
+        output_full = self.model(**input_tensor)
 
         if class_idx is None:
-            class_idx = torch.argmax(output.logits, dim=1).item()
+            class_idx = torch.argmax(output_full.logits, dim=1).item()
+
+        if visual_pooling_method == "CLS":
+            output = output_full.image_embeds
+        elif visual_pooling_method == "avg":
+            output = self.model.visual_projection(output_full.vision_model_output.last_hidden_state).mean(dim=1)
+        else:
+            # project -> pooling
+            output, _ = self.model.visual_projection(output_full.vision_model_output.last_hidden_state).max(dim=1)
+
+            # pooling -> project
+            # output_mx, _ = output_full.vision_model_output.last_hidden_state.max(dim=1)
+            # output = self.model.visual_projection(output_mx)
+
+        output.backward(output_full.text_embeds[class_idx: class_idx+1], retain_graph=True)
+
+        # Aggregate activations and gradients from ALL layers
+        print(self.activations, self.gradients)
+        cam_sum = None
+        for act, grad in zip(self.activations, self.gradients):
+
+            # act = torch.sigmoid(act[0])
+            act = F.relu(act[0])
+            
+            grad_weights = grad.mean(dim=-1, keepdim=True)
+            
+
+            print("act shape", act.shape)
+            print("grad_weights shape", grad_weights.shape)
+            
+            # cam = (act * grad_weights).sum(dim=-1)  # Weighted activation map
+            cam, _ = (act * grad_weights).max(dim=-1)
+            print(cam.shape)
+
+            # Sum across all layers
+            if cam_sum is None:
+                cam_sum = cam
+            else:
+                cam_sum += cam  
+                
+
+        # Normalize
+        cam_sum = F.relu(cam_sum)
+        cam_sum = cam_sum - cam_sum.min()
+        cam_sum = cam_sum / (cam_sum.max() - cam_sum.min())
+
+        # thresholding
+        cam_sum = cam_sum.to(torch.float32)
+        percentile = torch.quantile(cam_sum, 0.2)  # Adjust threshold dynamically
+        cam_sum[cam_sum < percentile] = 0
+
+        # Reshape
+        print("cam_sum shape: ", cam_sum.shape)
+        cam_sum = cam_sum[0, 1:]
+
+        num_patches = cam_sum.shape[-1]  # Last dimension of CAM output
+        grid_size = int(num_patches ** 0.5)
+        print(f"Detected grid size: {grid_size}x{grid_size}")
+        
+        cam_sum = cam_sum.view(grid_size, grid_size).detach()
+
+        return cam_sum, output_full, grid_size
+
+
+class AttentionGuidedCAMJanus(AttentionGuidedCAM):
+    def __init__(self, model, target_layers):
+        self.target_layers = target_layers[-2:]
+        super().__init__(model)
+
+
+    def generate_cam(self, input_tensor, tokenizer, temperature, top_p, class_idx=None, visual_pooling_method="CLS"):
+        """ Generates Grad-CAM heatmap for ViT. """
+        self.model.zero_grad()
+        
+        # Forward pass
+        image_embeddings, inputs_embeddings, outputs = self.model(input_tensor, tokenizer, temperature, top_p)
+
+
+        input_ids = input_tensor.input_ids
+
+        # Pooling
+        if visual_pooling_method == "CLS":
+            image_embeddings_pooled = image_embeddings[:, 0, :]
+        elif visual_pooling_method == "avg":
+            image_embeddings_pooled = image_embeddings[:, 1:, :].mean(dim=1) # end of image: 618
+        elif visual_pooling_method == "max":
+            image_embeddings_pooled, _ = image_embeddings[:, 1:, :].max(dim=1)
+
+        print("image_embeddings_shape: ", image_embeddings_pooled.shape)
+        
+
+
+        inputs_embeddings_pooled = inputs_embeddings.mean(dim=1)
+        # inputs_embeddings_pooled = inputs_embeddings[
+        #     torch.arange(inputs_embeddings.shape[0], device=inputs_embeddings.device),
+        #     input_ids.to(dtype=torch.int, device=inputs_embeddings.device).argmax(dim=-1),
+        # ]
+
 
         # Backpropagate to get gradients
-        output.logits[:, class_idx].backward(retain_graph=True)
+        image_embeddings_pooled.backward(inputs_embeddings_pooled, retain_graph=True)
+        # similarity = F.cosine_similarity(image_embeddings_mean, inputs_embeddings_mean, dim=-1)
+        # similarity.backward()
 
         # Aggregate activations and gradients from ALL layers
         cam_sum = None
         for act, grad in zip(self.activations, self.gradients):
-            # Apply sigmoid normalization (per paper)
-            act = torch.sigmoid(act)
-            
-            # Compute weighted sum
-            cam = torch.einsum("b h n, b h n -> b n", act, grad.mean(dim=[1, 2]))
+            # act = torch.sigmoid(act)
+            act = F.relu(act[0])
+ 
 
+            # Compute mean of gradients
+            grad_weights = grad.mean(dim=-1, keepdim=True)
+
+            print("act shape", act.shape)
+            print("grad_weights shape", grad_weights.shape)
+
+            cam, _ = (act * grad_weights).max(dim=-1)
+            print(cam.shape)
+
+            # Sum across all layers
             if cam_sum is None:
                 cam_sum = cam
             else:
-                cam_sum += cam  # Sum across layers
+                cam_sum += cam  
 
         # Normalize
         cam_sum = F.relu(cam_sum)
         cam_sum = cam_sum - cam_sum.min()
         cam_sum = cam_sum / cam_sum.max()
 
-        # Reshape to 24x24 (since CLIP uses 576 patches)
-        cam_sum = cam_sum.view(24, 24).detach().cpu().numpy()
+        # thresholding
+        cam_sum = cam_sum.to(torch.float32)
+        percentile = torch.quantile(cam_sum, 0.2)  # Adjust threshold dynamically
+        cam_sum[cam_sum < percentile] = 0
 
-        # Resize to 224x224
-        cam_sum = cv2.resize(cam_sum, (224, 224))
+        # Reshape
+        if visual_pooling_method == "CLS":
+            cam_sum = cam_sum[0, 1:]
+        print("cam_sum shape: ", cam_sum.shape)
+        num_patches = cam_sum.shape[-1]  # Last dimension of CAM output
+        grid_size = int(num_patches ** 0.5)
+        print(f"Detected grid size: {grid_size}x{grid_size}")
 
-        return cam_sum
-
-    def remove_hooks(self):
-        """ Remove hooks after usage. """
-        for hook in self.hooks:
-            hook.remove()
-
-
-
-
+        # Fix the reshaping step dynamically
+        
+        cam_sum = cam_sum.view(grid_size, grid_size)
 
 
+        return cam_sum, grid_size
 
 
 
 
 
 def generate_gradcam(
-    attributions, 
+    cam, 
     image,
     size = (384, 384),
     alpha=0.5, 
     colormap=cv2.COLORMAP_JET, 
-    aggregation='mean'
+    aggregation='mean',
+    normalize=True
 ):
     """
     Generates a Grad-CAM heatmap overlay on top of the input image.
@@ -207,26 +234,20 @@ def generate_gradcam(
     Returns:
       PIL.Image: The image overlaid with the Grad-CAM heatmap.
     """
-    print("Generating Grad-CAM with attributions shape:", attributions.shape)
+    print("Generating Grad-CAM with shape:", cam.shape)
 
-    # Aggregate the channel dimension to get a 2D map.
-
-    # Apply ReLU to the aggregated map
-    cam = F.relu(attributions)
-
-    # Normalize the map to [0, 1]
-    cam_min = cam.min()
-    cam_max = cam.max()
-    if cam_max - cam_min > 0:
-        cam = (cam - cam_min) / (cam_max - cam_min)
-    else:
-        cam = cam - cam_min  # This should result in a zero map if constant
-
+    if normalize:
+        cam_min, cam_max = cam.min(), cam.max()
+        cam = cam - cam_min
+        cam = cam / (cam_max - cam_min)
     # Convert tensor to numpy array
-    cam_np = cam.squeeze().detach().to(float).cpu().numpy()
+    cam = torch.nn.functional.interpolate(cam.unsqueeze(0).unsqueeze(0), size=size, mode='bilinear').squeeze()
+    cam_np = cam.squeeze().detach().cpu().numpy()
+
+    # Apply Gaussian blur for smoother heatmaps
+    cam_np = cv2.GaussianBlur(cam_np, (5,5), sigmaX=0.8)
 
     # Resize the cam to match the image size
-    # width, height = image.size  # PIL image size is (width, height)
     width, height = size
     cam_resized = cv2.resize(cam_np, (width, height))
 
