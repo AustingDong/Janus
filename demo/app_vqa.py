@@ -9,8 +9,15 @@ from demo.model_utils import Clip_Utils, Janus_Utils
 import numpy as np
 import os
 import time
+import gc
 
 
+model_type = "Janus-1B"
+janus_utils = Janus_Utils()
+vl_gpt, tokenizer = janus_utils.init_Janus(model_type.split('-')[-1])
+
+clip_utils = Clip_Utils()
+clip_utils.init_Clip()
 
 # @torch.inference_mode() # cancel inference, for gradcam
 # @spaces.GPU(duration=120) 
@@ -28,8 +35,7 @@ def multimodal_understanding(model_type,
     torch.cuda.manual_seed(seed)
 
     if model_type == "Clip":
-        clip_utils = Clip_Utils()
-        clip_utils.init_Clip()
+        
         inputs = clip_utils.prepare_inputs(question, image)
 
 
@@ -42,10 +48,10 @@ def multimodal_understanding(model_type,
             grad_cam.remove_hooks()
             target_token_decoded = ""
             answer = ""
+    
 
     elif model_type == "Janus-1B" or model_type == "Janus-7B":
-        janus_utils = Janus_Utils()
-        vl_gpt, tokenizer = janus_utils.init_Janus(model_type.split('-')[-1])
+        
         for param in vl_gpt.parameters():
             param.requires_grad = True
 
@@ -58,17 +64,19 @@ def multimodal_understanding(model_type,
         print("answer generated")
 
         if saliency_map_method == "GradCAM":
-            target_layer = vl_gpt.vision_model.vision_tower.blocks
+            # target_layers = vl_gpt.vision_model.vision_tower.blocks
+            target_layers = [block.norm1 for block in vl_gpt.vision_model.vision_tower.blocks]
 
-            gradcam = AttentionGuidedCAMJanus(vl_gpt, target_layer)
-            cam_tensor, grid_size = gradcam.generate_cam(prepare_inputs, tokenizer, temperature, top_p, target_token_idx)
+            gradcam = AttentionGuidedCAMJanus(vl_gpt, target_layers)
+            cam_tensor, grid_size = gradcam.generate_cam(prepare_inputs, tokenizer, temperature, top_p, target_token_idx, visual_pooling_method)
             cam_grid = cam_tensor.reshape(grid_size, grid_size)
             cam = generate_gradcam(cam_grid, image)
-
+        
         # output_arr = output.logits.detach().to(float).to("cpu").numpy()
         # predicted_ids = np.argmax(output_arr, axis=-1) # [1, num_tokens]
         # predicted_ids = predicted_ids.squeeze(0) # [num_tokens]
         # target_token_decoded = tokenizer.decode(predicted_ids[target_token_idx].tolist())
+
 
     return answer, [cam], ""
 

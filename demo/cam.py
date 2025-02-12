@@ -122,7 +122,7 @@ class AttentionGuidedCAMClip(AttentionGuidedCAM):
 
 class AttentionGuidedCAMJanus(AttentionGuidedCAM):
     def __init__(self, model, target_layers):
-        self.target_layers = target_layers[-2:]
+        self.target_layers = target_layers[-1:]
         super().__init__(model)
 
 
@@ -148,7 +148,11 @@ class AttentionGuidedCAMJanus(AttentionGuidedCAM):
         
 
 
-        inputs_embeddings_pooled = inputs_embeddings.mean(dim=1)
+        inputs_embeddings_pooled = inputs_embeddings[:, 620: -4].mean(dim=1)
+
+
+
+
         # inputs_embeddings_pooled = inputs_embeddings[
         #     torch.arange(inputs_embeddings.shape[0], device=inputs_embeddings.device),
         #     input_ids.to(dtype=torch.int, device=inputs_embeddings.device).argmax(dim=-1),
@@ -193,8 +197,8 @@ class AttentionGuidedCAMJanus(AttentionGuidedCAM):
         cam_sum[cam_sum < percentile] = 0
 
         # Reshape
-        if visual_pooling_method == "CLS":
-            cam_sum = cam_sum[0, 1:]
+        # if visual_pooling_method == "CLS":
+        cam_sum = cam_sum[0, 1:]
         print("cam_sum shape: ", cam_sum.shape)
         num_patches = cam_sum.shape[-1]  # Last dimension of CAM output
         grid_size = int(num_patches ** 0.5)
