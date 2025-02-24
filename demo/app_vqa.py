@@ -11,6 +11,10 @@ import os
 import time
 import gc
 
+model_seed = 42
+torch.manual_seed(model_seed)
+np.random.seed(model_seed)
+torch.cuda.manual_seed(model_seed)
 
 model_type = "Janus-1B"
 janus_utils = Janus_Utils()
