@@ -35,6 +35,12 @@ class AttentionGuidedCAM:
         """ Remove hooks after usage. """
         for hook in self.hooks:
             hook.remove()
+
+    # def normalize(self, arr):
+    #     arr = F.relu(arr)
+    #     arr = arr - arr.min()
+    #     arr = arr / (arr.max() - arr.min())
+    #     return arr
     
     def generate_cam(self, input_tensor, class_idx=None):
         raise NotImplementedError
@@ -44,10 +50,9 @@ class AttentionGuidedCAM:
 
 class AttentionGuidedCAMClip(AttentionGuidedCAM):
     def __init__(self, model, target_layers):
-        self.target_layers = target_layers[-1:]
+        self.target_layers = target_layers
         super().__init__(model)
-        
-
+    
     def generate_cam(self, input_tensor, class_idx=None, visual_pooling_method="CLS"):
         """ Generates Grad-CAM heatmap for ViT. """
         self.model.zero_grad()
@@ -70,7 +75,7 @@ class AttentionGuidedCAMClip(AttentionGuidedCAM):
             # output_mx, _ = output_full.vision_model_output.last_hidden_state.max(dim=1)
             # output = self.model.visual_projection(output_mx)
 
-        output.backward(output_full.text_embeds[class_idx: class_idx+1], retain_graph=True)
+        output.backward(output_full.text_embeds[class_idx:class_idx+1], retain_graph=True)
 
         # Aggregate activations and gradients from ALL layers
         print(self.activations, self.gradients)
@@ -88,6 +93,8 @@ class AttentionGuidedCAMClip(AttentionGuidedCAM):
             
             # cam = (act * grad_weights).sum(dim=-1)  # Weighted activation map
             cam, _ = (act * grad_weights).max(dim=-1)
+            # cam, _ = grad_weights.max(dim=-1)
+            # cam = self.normalize(cam)
             print(cam.shape)
 
             # Sum across all layers
@@ -122,7 +129,7 @@ class AttentionGuidedCAMClip(AttentionGuidedCAM):
 
 class AttentionGuidedCAMJanus(AttentionGuidedCAM):
     def __init__(self, model, target_layers):
-        self.target_layers = target_layers[-1:]
+        self.target_layers = target_layers
         super().__init__(model)
 
 

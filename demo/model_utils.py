@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from PIL import Image
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers import CLIPProcessor, CLIPModel
@@ -29,13 +30,17 @@ class Model_Utils:
 
 class Clip_Utils(Model_Utils):
     def __init__(self):
+        self.edge = 224
         super().__init__()
 
     def init_Clip(self):
         self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
         self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        self.processor.feature_extractor.size = {"height": self.edge, "width": self.edge}
 
     def prepare_inputs(self, question_lst, image):
+        image = Image.fromarray(image)
+        print("image_size: ", image.size)
         inputs = self.processor(text=question_lst, images=image, return_tensors="pt", padding=True)
         return inputs
         
@@ -54,7 +59,8 @@ class Janus_Utils(Model_Utils):
         self.vl_gpt = AutoModelForCausalLM.from_pretrained(model_path,
                                                     language_config=language_config,
                                                     trust_remote_code=True,
-                                                    ignore_mismatched_sizes=True)
+                                                    ignore_mismatched_sizes=True,
+                                                    )
         self.vl_gpt, self.dtype, self.cuda_device = set_dtype_device(self.vl_gpt)
         self.vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
         self.tokenizer = self.vl_chat_processor.tokenizer
@@ -94,6 +100,8 @@ class Janus_Utils(Model_Utils):
             use_cache=True,
             temperature=temperature,
             top_p=top_p,
+            return_dict_in_generate=True,
+            output_attentions=True
         )
 
         return outputs
