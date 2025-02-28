@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers import CLIPProcessor, CLIPModel
 from janus.models import MultiModalityCausalLM, VLChatProcessor
@@ -106,11 +106,38 @@ class Janus_Utils(Model_Utils):
 
         return outputs
 
-    
-    
 
-    
+def add_title_to_image(image, title, font_size=20):
+    """Adds a title above an image using PIL and textbbox()."""
+    img_width, img_height = image.size
 
+    # Create a blank image for title
+    title_height = font_size + 10  # Some padding
+    title_image = Image.new("RGB", (img_width, title_height), color=(255, 255, 255))  # White background
+    draw = ImageDraw.Draw(title_image)
+
+    # Load font
+    try:
+        font = ImageFont.truetype("arial.ttf", font_size)  # Use Arial if available
+    except:
+        font = ImageFont.load_default()  # Use default if Arial not found
+
+    # Get text size (updated for PIL >= 10)
+    text_bbox = draw.textbbox((0, 0), title, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+
+    # Center the title
+    text_position = ((img_width - text_width) // 2, (title_height - text_height) // 2)
+
+    draw.text(text_position, title, fill="black", font=font)
+
+    # Concatenate title with image
+    combined = Image.new("RGB", (img_width, img_height + title_height))
+    combined.paste(title_image, (0, 0))  # Place title at the top
+    combined.paste(image, (0, title_height))  # Place original image below
+
+    return combined
     
 
     
