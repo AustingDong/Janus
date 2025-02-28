@@ -1,13 +1,11 @@
 import cv2
 import numpy as np
-import types
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from PIL import Image
 from scipy.ndimage import filters
 from torch import nn
-from demo.modify_llama import *
 
 
 class AttentionGuidedCAM:
@@ -36,7 +34,13 @@ class AttentionGuidedCAM:
     def remove_hooks(self):
         """ Remove hooks after usage. """
         for hook in self.hooks:
-            hook.remove()  
+            hook.remove()
+
+    # def normalize(self, arr):
+    #     arr = F.relu(arr)
+    #     arr = arr - arr.min()
+    #     arr = arr / (arr.max() - arr.min())
+    #     return arr
     
     def generate_cam(self, input_tensor, class_idx=None):
         raise NotImplementedError
@@ -51,6 +55,7 @@ class AttentionGuidedCAMClip(AttentionGuidedCAM):
     
     def generate_cam(self, input_tensor, class_idx=None, visual_pooling_method="CLS"):
         """ Generates Grad-CAM heatmap for ViT. """
+        self.model.zero_grad()
         
         # Forward pass
         output_full = self.model(**input_tensor)
@@ -74,7 +79,6 @@ class AttentionGuidedCAMClip(AttentionGuidedCAM):
 
         # Aggregate activations and gradients from ALL layers
         print(self.activations, self.gradients)
-        self.model.zero_grad()
         cam_sum = None
         for act, grad in zip(self.activations, self.gradients):
 
@@ -127,32 +131,11 @@ class AttentionGuidedCAMJanus(AttentionGuidedCAM):
     def __init__(self, model, target_layers):
         self.target_layers = target_layers
         super().__init__(model)
-        self._modify_layers()
-        self._register_hooks_activations()
 
-    def _modify_layers(self):
-        for layer in self.target_layers:
-            setattr(layer, "attn_gradients", None)
-            setattr(layer, "attention_map", None)
 
-            layer.save_attn_gradients = types.MethodType(save_attn_gradients, layer)
-            layer.get_attn_gradients = types.MethodType(get_attn_gradients, layer)
-            layer.save_attn_map = types.MethodType(save_attn_map, layer)
-            layer.get_attn_map = types.MethodType(get_attn_map, layer)
-
-    def _forward_activate_hooks(self, module, input, output):
-        attn_output, attn_weights = output  # Unpack outputs
-        module.save_attn_map(attn_weights)
-        attn_weights.register_hook(module.save_attn_gradients)
-
-    def _register_hooks_activations(self):
-        for layer in self.target_layers:
-            if hasattr(layer, "q_proj"): # is an attention layer
-                self.hooks.append(layer.register_forward_hook(self._forward_activate_hooks))
-
-    def generate_cam(self, input_tensor, tokenizer, temperature, top_p, class_idx=None, visual_pooling_method="CLS", focus="Visual Encoder"):
+    def generate_cam(self, input_tensor, tokenizer, temperature, top_p, class_idx=None, visual_pooling_method="CLS"):
         """ Generates Grad-CAM heatmap for ViT. """
-        
+        self.model.zero_grad()
         
         # Forward pass
         image_embeddings, inputs_embeddings, outputs = self.model(input_tensor, tokenizer, temperature, top_p)
@@ -160,148 +143,80 @@ class AttentionGuidedCAMJanus(AttentionGuidedCAM):
 
         input_ids = input_tensor.input_ids
 
-        if focus == "Visual Encoder":
-            # Pooling
-            if visual_pooling_method == "CLS":
-                image_embeddings_pooled = image_embeddings[:, 0, :]
-            elif visual_pooling_method == "avg":
-                image_embeddings_pooled = image_embeddings[:, 1:, :].mean(dim=1) # end of image: 618
-            elif visual_pooling_method == "max":
-                image_embeddings_pooled, _ = image_embeddings[:, 1:, :].max(dim=1)
+        # Pooling
+        if visual_pooling_method == "CLS":
+            image_embeddings_pooled = image_embeddings[:, 0, :]
+        elif visual_pooling_method == "avg":
+            image_embeddings_pooled = image_embeddings[:, 1:, :].mean(dim=1) # end of image: 618
+        elif visual_pooling_method == "max":
+            image_embeddings_pooled, _ = image_embeddings[:, 1:, :].max(dim=1)
 
-            print("image_embeddings_shape: ", image_embeddings_pooled.shape)
-            
-
-
-            inputs_embeddings_pooled = inputs_embeddings[:, 620: -4].mean(dim=1)
-            self.model.zero_grad()
-            image_embeddings_pooled.backward(inputs_embeddings_pooled, retain_graph=True)
-
-            cam_sum = None
-            for act, grad in zip(self.activations, self.gradients):
-                # act = torch.sigmoid(act)
-                act = F.relu(act[0])
-    
-
-                # Compute mean of gradients
-                grad_weights = grad.mean(dim=-1, keepdim=True)
-
-                print("act shape", act.shape)
-                print("grad_weights shape", grad_weights.shape)
-
-                cam, _ = (act * grad_weights).max(dim=-1)
-                print(cam.shape)
-
-                # Sum across all layers
-                if cam_sum is None:
-                    cam_sum = cam
-                else:
-                    cam_sum += cam  
-
-            # Normalize
-            cam_sum = F.relu(cam_sum)
-            cam_sum = cam_sum - cam_sum.min()
-            cam_sum = cam_sum / cam_sum.max()
-
-            # thresholding
-            cam_sum = cam_sum.to(torch.float32)
-            percentile = torch.quantile(cam_sum, 0.2)  # Adjust threshold dynamically
-            cam_sum[cam_sum < percentile] = 0
-
-            # Reshape
-            # if visual_pooling_method == "CLS":
-            cam_sum = cam_sum[0, 1:]
-            print("cam_sum shape: ", cam_sum.shape)
-            num_patches = cam_sum.shape[-1]  # Last dimension of CAM output
-            grid_size = int(num_patches ** 0.5)
-            print(f"Detected grid size: {grid_size}x{grid_size}")
-
-            # Fix the reshaping step dynamically
-            
-            cam_sum = cam_sum.view(grid_size, grid_size)
+        print("image_embeddings_shape: ", image_embeddings_pooled.shape)
+        
 
 
-            return cam_sum, grid_size
+        inputs_embeddings_pooled = inputs_embeddings[:, 620: -4].mean(dim=1)
 
 
 
 
+        # inputs_embeddings_pooled = inputs_embeddings[
+        #     torch.arange(inputs_embeddings.shape[0], device=inputs_embeddings.device),
+        #     input_ids.to(dtype=torch.int, device=inputs_embeddings.device).argmax(dim=-1),
+        # ]
 
 
-        elif focus == "Language Model":
-            loss = self.target_layers[-1].attention_map.sum()
-            self.model.zero_grad()
-            loss.backward()
-            
-            self.activations = [layer.get_attn_map() for layer in self.target_layers]
-            self.gradients = [layer.get_attn_gradients() for layer in self.target_layers]
-
-            cam_sum = None
-            for act, grad in zip(self.activations, self.gradients):
-                # act = torch.sigmoid(act)
-                print("act:", act)
-                print(len(act))
-                print("act_shape:", act.shape)
-                # print("act1_shape:", act[1].shape)
-                
-                act = F.relu(act.mean(dim=1))
-    
-
-                # Compute mean of gradients
-                print("grad:", grad)
-                print(len(grad))
-                print("grad_shape:", grad.shape)
-                grad_weights = grad.mean(dim=1)
-
-                print("act shape", act.shape)
-                print("grad_weights shape", grad_weights.shape)
-
-                # cam, _ = (act * grad_weights).max(dim=-1)
-                # cam = act * grad_weights
-                cam = act * grad_weights
-                print(cam.shape)
-
-                # Sum across all layers
-                if cam_sum is None:
-                    cam_sum = cam
-                else:
-                    cam_sum += cam  
-
-            # Normalize
-            cam_sum = F.relu(cam_sum)
-            cam_sum = cam_sum - cam_sum.min()
-            cam_sum = cam_sum / cam_sum.max()
-
-            # thresholding
-            cam_sum = cam_sum.to(torch.float32)
-            percentile = torch.quantile(cam_sum, 0.2)  # Adjust threshold dynamically
-            cam_sum[cam_sum < percentile] = 0
-
-            # Reshape
-            # if visual_pooling_method == "CLS":
-            # cam_sum = cam_sum[0, 1:]
-
-            # cam_sum shape: [1, seq_len, seq_len]
-            cam_sum_lst = []
-            cam_sum_raw = cam_sum
-            for i in range(620, cam_sum_raw.shape[1]):
-                cam_sum = cam_sum_raw[:, i, :] # shape: [1: seq_len]
-                cam_sum = cam_sum[input_tensor.images_seq_mask].unsqueeze(0) # shape: [1, 576]
-                print("cam_sum shape: ", cam_sum.shape)
-                num_patches = cam_sum.shape[-1]  # Last dimension of CAM output
-                grid_size = int(num_patches ** 0.5)
-                print(f"Detected grid size: {grid_size}x{grid_size}")
-
-                # Fix the reshaping step dynamically
-                
-                cam_sum = cam_sum.view(grid_size, grid_size)
-                cam_sum_lst.append(cam_sum)
-
-
-            return cam_sum_lst, grid_size
+        # Backpropagate to get gradients
+        image_embeddings_pooled.backward(inputs_embeddings_pooled, retain_graph=True)
+        # similarity = F.cosine_similarity(image_embeddings_mean, inputs_embeddings_mean, dim=-1)
+        # similarity.backward()
 
         # Aggregate activations and gradients from ALL layers
+        cam_sum = None
+        for act, grad in zip(self.activations, self.gradients):
+            # act = torch.sigmoid(act)
+            act = F.relu(act[0])
+ 
+
+            # Compute mean of gradients
+            grad_weights = grad.mean(dim=-1, keepdim=True)
+
+            print("act shape", act.shape)
+            print("grad_weights shape", grad_weights.shape)
+
+            cam, _ = (act * grad_weights).max(dim=-1)
+            print(cam.shape)
+
+            # Sum across all layers
+            if cam_sum is None:
+                cam_sum = cam
+            else:
+                cam_sum += cam  
+
+        # Normalize
+        cam_sum = F.relu(cam_sum)
+        cam_sum = cam_sum - cam_sum.min()
+        cam_sum = cam_sum / cam_sum.max()
+
+        # thresholding
+        cam_sum = cam_sum.to(torch.float32)
+        percentile = torch.quantile(cam_sum, 0.2)  # Adjust threshold dynamically
+        cam_sum[cam_sum < percentile] = 0
+
+        # Reshape
+        # if visual_pooling_method == "CLS":
+        cam_sum = cam_sum[0, 1:]
+        print("cam_sum shape: ", cam_sum.shape)
+        num_patches = cam_sum.shape[-1]  # Last dimension of CAM output
+        grid_size = int(num_patches ** 0.5)
+        print(f"Detected grid size: {grid_size}x{grid_size}")
+
+        # Fix the reshaping step dynamically
         
+        cam_sum = cam_sum.view(grid_size, grid_size)
+
+
+        return cam_sum, grid_size
 
 
 
